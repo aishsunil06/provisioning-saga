@@ -24,6 +24,7 @@
         <module>common</module>
         <module>inventory-service</module>
         <module>provisioning-service</module>
+        <module>order-service</module>
     </modules>
 
     <properties>
