@@ -9,6 +9,7 @@ import dev.aishsunil.provisioning.order.client.HttpProvisioningClient;
 import dev.aishsunil.provisioning.order.client.InventoryClient;
 import dev.aishsunil.provisioning.order.client.ProvisioningClient;
 import dev.aishsunil.provisioning.order.saga.NaiveExecutor;
+import dev.aishsunil.provisioning.order.saga.SagaCompensatingExecutor;
 import dev.aishsunil.provisioning.order.saga.SagaExecutor;
 import org.slf4j.MDC;
 
@@ -36,9 +37,12 @@ public class SagaConfiguration {
     }
 
     @Bean
-    public SagaExecutor sagaExecutor(@Value("${saga.mechanism:naive}") String mechanism) {
+    public SagaExecutor sagaExecutor(@Value("${saga.mechanism:naive}") String mechanism,
+            @Value("${saga.retry.max-attempts:3}") int maxAttempts,
+            @Value("${saga.retry.backoff-ms:50}") long backoffMs) {
         return switch (mechanism) {
             case "naive" -> new NaiveExecutor();
+            case "saga" -> new SagaCompensatingExecutor(maxAttempts, backoffMs);
             default -> throw new IllegalArgumentException("unknown saga.mechanism: " + mechanism);
         };
     }
