@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: provisioning-service
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/provisioning_db}
+    username: ${SPRING_DATASOURCE_USERNAME:provisioning}
+    password: ${SPRING_DATASOURCE_PASSWORD:provisioning}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+
+server:
+  port: ${SERVER_PORT:8082}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  structured:
+    format:
+      console: ${LOGGING_FORMAT:}
+
+network:
+  profile:
+    failure-rate: ${NETWORK_PROFILE_FAILURE_RATE:0.0}
+    lost-response-rate: ${NETWORK_PROFILE_LOST_RESPONSE_RATE:0.0}
+    mean-latency-ms: ${NETWORK_PROFILE_MEAN_LATENCY_MS:0}
+    seed: ${NETWORK_PROFILE_SEED:20261109}
+    timeout-ms: ${NETWORK_PROFILE_TIMEOUT_MS:2000}
