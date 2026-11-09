@@ -1,0 +1,92 @@
+# The whole system on one command.
+#
+# Build the jars first; the Dockerfiles copy them rather than building inside
+# the image:
+#     ./mvnw -DskipTests package && docker compose up -d --build
+#
+# Every knob the experiment turns is an environment variable here, so a run
+# changes the environment rather than a file or a build.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: provisioning
+      POSTGRES_PASSWORD: provisioning
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./scripts/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U provisioning -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  inventory-service:
+    build: ./inventory-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/inventory_db
+      SPRING_DATASOURCE_USERNAME: provisioning
+      SPRING_DATASOURCE_PASSWORD: provisioning
+      LOGGING_FORMAT: ${LOGGING_FORMAT:-logstash}
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/actuator/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  provisioning-service:
+    build: ./provisioning-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/provisioning_db
+      SPRING_DATASOURCE_USERNAME: provisioning
+      SPRING_DATASOURCE_PASSWORD: provisioning
+      LOGGING_FORMAT: ${LOGGING_FORMAT:-logstash}
+      # The experiment's independent variables.
+      NETWORK_PROFILE_FAILURE_RATE: ${NETWORK_PROFILE_FAILURE_RATE:-0.0}
+      NETWORK_PROFILE_LOST_RESPONSE_RATE: ${NETWORK_PROFILE_LOST_RESPONSE_RATE:-0.0}
+      NETWORK_PROFILE_MEAN_LATENCY_MS: ${NETWORK_PROFILE_MEAN_LATENCY_MS:-0}
+      NETWORK_PROFILE_SEED: ${NETWORK_PROFILE_SEED:-20261109}
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8082/actuator/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  order-service:
+    build: ./order-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/orders_db
+      SPRING_DATASOURCE_USERNAME: provisioning
+      SPRING_DATASOURCE_PASSWORD: provisioning
+      LOGGING_FORMAT: ${LOGGING_FORMAT:-logstash}
+      CLIENTS_INVENTORY_BASE_URL: http://inventory-service:8081
+      CLIENTS_PROVISIONING_BASE_URL: http://provisioning-service:8082
+      # Which arm is under test.
+      SAGA_MECHANISM: ${SAGA_MECHANISM:-naive}
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      provisioning-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/actuator/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
