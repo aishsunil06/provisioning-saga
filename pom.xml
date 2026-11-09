@@ -22,12 +22,38 @@
          to load a <module> whose directory does not exist yet. -->
     <modules>
         <module>common</module>
+        <module>inventory-service</module>
     </modules>
 
     <properties>
         <java.version>21</java.version>
         <spring-cloud.version>2025.1.4</spring-cloud.version>
     </properties>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <!-- Surefire's default includes stop at *Test/*Tests, so a
+                             Testcontainers-backed *IT class is silently skipped and the
+                             build still reports success. In a repository whose entire
+                             premise is that its numbers reproduce, a test command that
+                             quietly runs none of the tests proving the headline claim is
+                             the most dangerous thing that could ship, so the integration
+                             tests run in the same phase rather than behind `verify`. -->
+                        <includes>
+                            <include>**/*Test.java</include>
+                            <include>**/*Tests.java</include>
+                            <include>**/*IT.java</include>
+                        </includes>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
 
     <dependencyManagement>
         <dependencies>
