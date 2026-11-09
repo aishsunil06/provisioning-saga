@@ -25,6 +25,7 @@
         <module>inventory-service</module>
         <module>provisioning-service</module>
         <module>order-service</module>
+        <module>gateway</module>
     </modules>
 
     <properties>

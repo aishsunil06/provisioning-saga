@@ -90,3 +90,21 @@ services:
       interval: 3s
       timeout: 3s
       retries: 40
+
+  gateway:
+    build: ./gateway
+    environment:
+      LOGGING_FORMAT: ${LOGGING_FORMAT:-logstash}
+      CLIENTS_ORDER_BASE_URL: http://order-service:8083
+      CLIENTS_INVENTORY_BASE_URL: http://inventory-service:8081
+      CLIENTS_PROVISIONING_BASE_URL: http://provisioning-service:8082
+    ports:
+      - "8080:8080"
+    depends_on:
+      order-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/actuator/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
