@@ -9,6 +9,11 @@ import dev.aishsunil.provisioning.order.client.HttpProvisioningClient;
 import dev.aishsunil.provisioning.order.client.InventoryClient;
 import dev.aishsunil.provisioning.order.client.ProvisioningClient;
 import dev.aishsunil.provisioning.order.saga.NaiveExecutor;
+import dev.aishsunil.provisioning.order.outbox.Compensations;
+import dev.aishsunil.provisioning.order.outbox.OutboxExecutor;
+import dev.aishsunil.provisioning.order.outbox.OutboxRelay;
+import dev.aishsunil.provisioning.order.outbox.OutboxRepository;
+import dev.aishsunil.provisioning.order.outbox.OutboxWriter;
 import dev.aishsunil.provisioning.order.saga.SagaCompensatingExecutor;
 import dev.aishsunil.provisioning.order.saga.SagaExecutor;
 import org.slf4j.MDC;
@@ -19,6 +24,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.ClientHttpRequestFactory;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import java.util.Map;
+
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.client.RestClient;
 
 /**
@@ -36,13 +45,38 @@ public class SagaConfiguration {
         return new CallPolicy(maxAttempts, backoffMs);
     }
 
+    /**
+     * How to undo each step, by name.
+     *
+     * <p>One mapping serves both the saga steps and the relay. The relay may be
+     * a different process from the one that failed, so it can only reconstruct
+     * a compensation from a name in a table, and a second copy of this mapping
+     * would be a second thing to keep in step with the first.
+     */
+    @Bean
+    public Compensations compensations(InventoryClient inventory, ProvisioningClient provisioning) {
+        return new Compensations(Map.of("reserve", inventory::release, "provision", provisioning::deprovision));
+    }
+
+    @Bean
+    public TransactionTemplate sagaTransactionTemplate(PlatformTransactionManager transactionManager) {
+        return new TransactionTemplate(transactionManager);
+    }
+
+    @Bean
+    public OutboxRelay outboxRelay(OutboxRepository outbox, Compensations compensations,
+            TransactionTemplate transactions, @Value("${saga.outbox.batch-size:50}") int batchSize) {
+        return new OutboxRelay(outbox, compensations, transactions, batchSize);
+    }
+
     @Bean
     public SagaExecutor sagaExecutor(@Value("${saga.mechanism:naive}") String mechanism,
             @Value("${saga.retry.max-attempts:3}") int maxAttempts,
-            @Value("${saga.retry.backoff-ms:50}") long backoffMs) {
+            @Value("${saga.retry.backoff-ms:50}") long backoffMs, OutboxWriter outboxWriter) {
         return switch (mechanism) {
             case "naive" -> new NaiveExecutor();
             case "saga" -> new SagaCompensatingExecutor(maxAttempts, backoffMs);
+            case "outbox" -> new OutboxExecutor(outboxWriter);
             default -> throw new IllegalArgumentException("unknown saga.mechanism: " + mechanism);
         };
     }

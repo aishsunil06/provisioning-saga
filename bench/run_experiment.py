@@ -17,6 +17,7 @@ import os
 import pathlib
 import statistics
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -95,15 +96,52 @@ def _clear_databases() -> None:
         conn.execute("DELETE FROM provisions")
 
 
+def _kill_orchestrator_midway(n: int, rate: float) -> threading.Thread:
+    """Kills and restarts the order service about halfway through a run.
+
+    SIGKILL, not a graceful stop: a process that gets to run its shutdown hooks
+    is not the failure being tested. The point is a process that stops between
+    one statement and the next.
+    """
+
+    def kill() -> None:
+        time.sleep((n / rate) / 2 if rate > 0 else 1.0)
+        subprocess.run(
+            ["docker", "compose", "kill", "-s", "SIGKILL", "order-service"],
+            cwd=REPO_ROOT, check=False, capture_output=True,
+        )
+        subprocess.run(
+            ["docker", "compose", "up", "-d", "--wait", "order-service"],
+            cwd=REPO_ROOT, check=False, capture_output=True,
+        )
+
+    thread = threading.Thread(target=kill, daemon=True)
+    thread.start()
+    return thread
+
+
 def run_once(arm: str, profile: BenchProfile, run: int, n: int, rate: float, seed: int) -> ResultRow:
     _reconfigure(arm, profile, seed)
     _clear_databases()
+
+    killer = _kill_orchestrator_midway(n, rate) if profile.kill_orchestrator else None
 
     driver = http_driver(GATEWAY, terminal_timeout_s=120.0)
     try:
         results = driver.run(n=n, rate=rate)
     except TerminalTimeout as timeout:
         raise RuntimeError(f"run {run} of {arm}/{profile.name} never settled: {timeout}") from timeout
+    finally:
+        if killer is not None:
+            killer.join(timeout=180)
+            _await_gateway()
+
+    if profile.kill_orchestrator:
+        # Arm C's relay only runs while the order service is alive, and the
+        # service it has to reach was just restarted. Give the relay a few poll
+        # intervals to drain the outbox before counting, or the measurement
+        # would be of how fast the check ran rather than of the mechanism.
+        time.sleep(5)
 
     counts: DefectCounts = check()
     states: dict[str, int] = {}

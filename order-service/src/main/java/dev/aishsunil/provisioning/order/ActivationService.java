@@ -6,6 +6,7 @@ import java.util.UUID;
 
 import dev.aishsunil.provisioning.order.client.InventoryClient;
 import dev.aishsunil.provisioning.order.client.ProvisioningClient;
+import dev.aishsunil.provisioning.order.outbox.Compensations;
 import dev.aishsunil.provisioning.order.saga.SagaContext;
 import dev.aishsunil.provisioning.order.saga.SagaExecutor;
 import dev.aishsunil.provisioning.order.saga.SagaOutcome;
@@ -31,12 +32,15 @@ public class ActivationService {
 
     private final SagaExecutor executor;
 
+    private final Compensations compensations;
+
     public ActivationService(OrderJournal journal, InventoryClient inventory, ProvisioningClient provisioning,
-            SagaExecutor executor) {
+            SagaExecutor executor, Compensations compensations) {
         this.journal = journal;
         this.inventory = inventory;
         this.provisioning = provisioning;
         this.executor = executor;
+        this.compensations = compensations;
     }
 
     public ActivationView activate(String customerId, String plan, String lineType) {
@@ -78,7 +82,7 @@ public class ActivationService {
 
             @Override
             public void compensate(SagaContext context) {
-                ActivationService.this.inventory.release(context.activationId());
+                ActivationService.this.compensations.apply(name(), context.activationId());
             }
         };
     }
@@ -98,7 +102,7 @@ public class ActivationService {
 
             @Override
             public void compensate(SagaContext context) {
-                ActivationService.this.provisioning.deprovision(context.activationId());
+                ActivationService.this.compensations.apply(name(), context.activationId());
             }
         };
     }

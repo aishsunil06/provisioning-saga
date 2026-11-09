@@ -18,6 +18,12 @@ TERMINAL_STATES = frozenset({"ACTIVE", "FAILED", "COMPENSATED"})
 
 SUBMIT_FAILED = "SUBMIT_FAILED"
 
+#: The state of an activation the system could not be asked about. Not terminal,
+#: so the driver keeps polling: the kill profile deliberately makes the service
+#: unavailable, and a poller that treated that as fatal could not measure the
+#: one run it exists for.
+UNKNOWN = "UNKNOWN"
+
 
 class TerminalTimeout(RuntimeError):
     """An activation never reached a terminal state."""
@@ -102,7 +108,14 @@ def http_driver(gateway: str, **kwargs) -> Driver:
                 return json.loads(response.read())["state"]
         except urllib.error.HTTPError as error:
             if error.code == 404:
+                # Submitted, not yet readable, or the order row is gone.
                 return "PENDING"
+            if error.code >= 500:
+                return UNKNOWN
             raise
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, KeyError):
+            # Refused, reset, or an unparseable body from a service that is
+            # starting back up.
+            return UNKNOWN
 
     return Driver(submit=submit, poll=poll, **kwargs)
