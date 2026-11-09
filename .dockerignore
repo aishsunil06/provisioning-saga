@@ -1,0 +1,9 @@
+target/
+.git/
+.superpowers/
+docs/
+bench/results/
+k8s/
+**/target/
+__pycache__/
+.pytest_cache/
