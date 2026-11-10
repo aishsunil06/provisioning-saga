@@ -27,13 +27,19 @@ import time
 import urllib.error
 import urllib.request
 
+from bench.cluster_metrics import parse_top, utilisation_percent
 from bench.driver import SUBMIT_FAILED, UNKNOWN, http_driver
+from bench.pool import free_lines_sql, parse_count, pool_reset_sql, require_free_lines
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "bench" / "results"
 NAMESPACE = "provisioning"
 LOCAL_PORT = 18080
 GATEWAY = f"http://localhost:{LOCAL_PORT}"
+# Must match the CPU request in k8s/provisioning.yaml. The HPA computes
+# utilisation against the request, so a sampler using a different figure would
+# report a ratio the HPA never saw.
+PROVISIONING_CPU_REQUEST_M = 200
 
 
 def _kubectl(*args: str, check: bool = True) -> str:
@@ -41,6 +47,34 @@ def _kubectl(*args: str, check: bool = True) -> str:
         ["kubectl", "-n", NAMESPACE, *args], capture_output=True, text=True, check=check
     )
     return completed.stdout.strip()
+
+
+def _postgres_pod() -> str:
+    return _kubectl("get", "pod", "-l", "app=postgres", "-o",
+                    "jsonpath={.items[0].metadata.name}")
+
+
+def _psql(sql: str, tuples_only: bool = False) -> str:
+    flags = ["--tuples-only", "--no-align"] if tuples_only else []
+    return _kubectl("exec", _postgres_pod(), "--", "psql", "-U", "provisioning",
+                    "-d", "inventory_db", *flags, "-c", sql)
+
+
+def _reset_pool() -> int:
+    """Puts every line back in the pool and reports how many are free.
+
+    Without this the experiment measures a different system on every run. A
+    successful activation keeps its line, so 2,000 lines cover about 2,000
+    activations across the whole life of the cluster; past that, activations
+    fail fast on an empty pool, which lowers the latency percentiles of a run
+    that is no longer measuring activation at all.
+    """
+    _psql(pool_reset_sql())
+    return _free_lines()
+
+
+def _free_lines() -> int:
+    return parse_count(_psql(free_lines_sql(), tuples_only=True))
 
 
 def _pin_replicas(replicas: int) -> None:
@@ -101,12 +135,31 @@ class _PortForward:
             self._process.kill()
 
 
-def _watch_replicas(stop: threading.Event, samples: list[tuple[float, int]]) -> threading.Thread:
+def _provisioning_cpu_percent() -> int | None:
+    """The utilisation figure the HPA is deciding on, or None if it has none."""
+    output = _kubectl("top", "pods", "-l", "app=provisioning-service",
+                      "--no-headers", check=False)
+    return utilisation_percent(parse_top(output), PROVISIONING_CPU_REQUEST_M)
+
+
+def _watch_cluster(stop: threading.Event, samples: list[dict]) -> threading.Thread:
+    """Samples replicas and CPU together for the life of one run.
+
+    The replica count alone cannot explain itself. An HPA that stays at one
+    replica has either not had time to react or has correctly decided there is
+    nothing to react to, and those are opposite findings. The CPU column is
+    what tells them apart, so it is sampled from the same loop and lands in the
+    same row.
+    """
     started = time.monotonic()
 
     def watch() -> None:
         while not stop.is_set():
-            samples.append((round(time.monotonic() - started, 1), _ready_replicas()))
+            samples.append({
+                "t": round(time.monotonic() - started, 1),
+                "replicas": _ready_replicas(),
+                "cpu_percent": _provisioning_cpu_percent(),
+            })
             stop.wait(2.0)
 
     thread = threading.Thread(target=watch, daemon=True)
@@ -120,9 +173,12 @@ def run_once(mode: str, replicas: int, n: int, rate: float, concurrency: int) ->
     else:
         _allow_autoscaling(1, 5)
 
-    samples: list[tuple[float, int]] = []
+    free_before = _reset_pool()
+    require_free_lines(free=free_before, needed=n)
+
+    samples: list[dict] = []
     stop = threading.Event()
-    watcher = _watch_replicas(stop, samples)
+    watcher = _watch_cluster(stop, samples)
 
     with _PortForward():
         driver = http_driver(GATEWAY, terminal_timeout_s=180.0)
@@ -142,6 +198,8 @@ def run_once(mode: str, replicas: int, n: int, rate: float, concurrency: int) ->
         index = min(len(settled) - 1, int(round(p / 100.0 * (len(settled) - 1))))
         return round(settled[index], 1)
 
+    cpu_seen = [s["cpu_percent"] for s in samples if s["cpu_percent"] is not None]
+
     return {
         "mode": mode,
         "replicas_requested": replicas if mode == "fixed" else None,
@@ -154,8 +212,14 @@ def run_once(mode: str, replicas: int, n: int, rate: float, concurrency: int) ->
         "p95_ms": percentile(95),
         "p99_ms": percentile(99),
         "submit_failed": sum(1 for r in results if r.state == SUBMIT_FAILED),
-        "replica_samples": samples,
-        "max_ready_replicas": max((count for _, count in samples), default=0),
+        # The pool figures are the run's own evidence that it measured
+        # activation rather than an empty pool.
+        "free_lines_before": free_before,
+        "free_lines_after": _free_lines(),
+        "cluster_samples": samples,
+        "max_ready_replicas": max((s["replicas"] for s in samples), default=0),
+        "max_cpu_percent": max(cpu_seen, default=None),
+        "mean_cpu_percent": round(statistics.mean(cpu_seen)) if cpu_seen else None,
     }
 
 
@@ -183,7 +247,8 @@ def main() -> None:
             handle.flush()
             rows.append(row)
             print(f"run {run}/{args.runs}: p50={row['p50_ms']}ms p95={row['p95_ms']}ms "
-                  f"throughput={row['throughput_per_s']}/s max_replicas={row['max_ready_replicas']}")
+                  f"throughput={row['throughput_per_s']}/s max_replicas={row['max_ready_replicas']} "
+                  f"cpu_max={row['max_cpu_percent']}% pool={row['free_lines_before']}->{row['free_lines_after']}")
 
     def summarise(key: str) -> str:
         values = [row[key] for row in rows]
