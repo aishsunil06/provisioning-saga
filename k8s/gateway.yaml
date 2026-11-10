@@ -40,11 +40,21 @@ spec:
               value: http://inventory-service:8081
             - name: CLIENTS_PROVISIONING_BASE_URL
               value: http://provisioning-service:8082
+          # Spring Boot needs well over a minute to start on a fraction of a CPU:
+          # context initialisation alone measured 14.9 s here. A startupProbe is
+          # what keeps the liveness probe from killing a container that is
+          # starting correctly but slowly, which is what happened without it:
+          # five restarts, each one interrupting Hibernate mid-initialisation.
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness
               port: 8080
-            initialDelaySeconds: 10
             periodSeconds: 3
             failureThreshold: 30
           resources:
@@ -52,5 +62,5 @@ spec:
               cpu: 200m
               memory: 320Mi
             limits:
-              cpu: 500m
+              cpu: "1"
               memory: 640Mi

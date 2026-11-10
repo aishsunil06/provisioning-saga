@@ -17,7 +17,10 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./scripts/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
+      # One source of truth, shared with the Kubernetes ConfigMap. It lives
+      # under k8s/ because kustomize refuses to read a generator source from
+      # outside its own directory, while Compose can mount from anywhere.
+      - ./k8s/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U provisioning -d postgres"]
       interval: 2s

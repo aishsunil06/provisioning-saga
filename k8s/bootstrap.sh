@@ -14,12 +14,16 @@ CLUSTER="${CLUSTER:-provisioning}"
 NAMESPACE=provisioning
 METRICS_SERVER_VERSION="${METRICS_SERVER_VERSION:-v0.7.2}"
 
+# Only the locally built images. postgres:16 is deliberately absent: it is a
+# public multi-platform image, and `kind load` imports with --all-platforms,
+# which fails when Docker's containerd snapshotter holds only the layers for
+# this machine's architecture ("content digest ... not found"). The cluster
+# pulls it from the registry instead, which is what a registry is for.
 IMAGES=(
   provisioning-saga-inventory-service:latest
   provisioning-saga-provisioning-service:latest
   provisioning-saga-order-service:latest
   provisioning-saga-gateway:latest
-  postgres:16
 )
 
 echo "==> cluster"

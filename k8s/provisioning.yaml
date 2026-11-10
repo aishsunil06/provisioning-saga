@@ -48,18 +48,27 @@ spec:
               value: "40"
             - name: NETWORK_PROFILE_SEED
               value: "20261109"
+          # Spring Boot needs well over a minute to start on a fraction of a CPU:
+          # context initialisation alone measured 14.9 s here. A startupProbe is
+          # what keeps the liveness probe from killing a container that is
+          # starting correctly but slowly, which is what happened without it:
+          # five restarts, each one interrupting Hibernate mid-initialisation.
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8082
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness
               port: 8082
-            initialDelaySeconds: 10
             periodSeconds: 3
             failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /actuator/health/liveness
               port: 8082
-            initialDelaySeconds: 30
             periodSeconds: 10
           resources:
             # An HPA cannot compute a utilisation ratio without a CPU request,
@@ -68,5 +77,5 @@ spec:
               cpu: 200m
               memory: 384Mi
             limits:
-              cpu: 500m
+              cpu: "1"
               memory: 768Mi

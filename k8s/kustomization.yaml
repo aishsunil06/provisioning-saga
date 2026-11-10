@@ -15,4 +15,4 @@ resources:
 configMapGenerator:
   - name: postgres-init
     files:
-      - init-databases.sql=../scripts/init-databases.sql
+      - init-databases.sql=init-databases.sql
