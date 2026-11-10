@@ -10,7 +10,6 @@ target/
 .classpath
 .project
 .superpowers/
-bench/results/*.jsonl
 __pycache__/
 .pytest_cache/
 .venv/
