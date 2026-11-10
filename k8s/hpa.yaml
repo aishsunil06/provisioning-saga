@@ -1,0 +1,36 @@
+# Scales the provisioning service, which is the slow step: it is the one that
+# talks to the network and the one a burst of activations queues behind.
+#
+# Requires metrics-server in the cluster. Without it the HPA reports <unknown>
+# for current utilisation and never scales, which looks like an HPA that does
+# not help rather than one that cannot see.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: provisioning-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: provisioning-service
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      # Default stabilisation is 0s up, but the 15s window below still means a
+      # burst shorter than roughly half a minute can finish before replicas
+      # arrive. That is a property worth measuring rather than tuning away.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 60

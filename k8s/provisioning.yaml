@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: provisioning-service
+spec:
+  selector:
+    app: provisioning-service
+  ports:
+    - port: 8082
+      targetPort: 8082
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: provisioning-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: provisioning-service
+  template:
+    metadata:
+      labels:
+        app: provisioning-service
+    spec:
+      containers:
+        - name: provisioning-service
+          image: provisioning-saga-provisioning-service:latest
+          # The images are built locally and loaded into the cluster with
+          # "kind load docker-image"; there is no registry to pull them from.
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8082
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: jdbc:postgresql://postgres:5432/provisioning_db
+            - name: SPRING_DATASOURCE_USERNAME
+              value: provisioning
+            - name: SPRING_DATASOURCE_PASSWORD
+              value: provisioning
+            - name: LOGGING_FORMAT
+              value: logstash
+            - name: NETWORK_PROFILE_FAILURE_RATE
+              value: "0.10"
+            - name: NETWORK_PROFILE_LOST_RESPONSE_RATE
+              value: "0.0"
+            - name: NETWORK_PROFILE_MEAN_LATENCY_MS
+              value: "40"
+            - name: NETWORK_PROFILE_SEED
+              value: "20261109"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8082
+            initialDelaySeconds: 10
+            periodSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8082
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            # An HPA cannot compute a utilisation ratio without a CPU request,
+            # so this is required rather than good practice.
+            requests:
+              cpu: 200m
+              memory: 384Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
