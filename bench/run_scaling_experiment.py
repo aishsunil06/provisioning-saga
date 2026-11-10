@@ -30,6 +30,7 @@ import urllib.request
 from bench.cluster_metrics import parse_top, utilisation_percent
 from bench.driver import SUBMIT_FAILED, UNKNOWN, http_driver
 from bench.pool import free_lines_sql, parse_count, pool_reset_sql, require_free_lines
+from bench.scale_timeline import scale_timeline
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 RESULTS_DIR = REPO_ROOT / "bench" / "results"
@@ -98,9 +99,24 @@ def _allow_autoscaling(min_replicas: int, max_replicas: int) -> None:
     _kubectl("rollout", "status", "deployment/provisioning-service", "--timeout=180s")
 
 
+def _replica_counts() -> tuple[int, int]:
+    """(desired, ready) for the provisioning deployment, in one call.
+
+    Both are needed and they are not the same measurement. The HPA edits the
+    desired count; the ready count follows whenever the container finishes
+    starting, which for this service is over a minute. Sampling only the ready
+    count reports an HPA that reacted in five seconds and an HPA that never
+    reacted as the same number.
+    """
+    out = _kubectl("get", "deployment/provisioning-service", "-o",
+                   "jsonpath={.spec.replicas},{.status.readyReplicas}", check=False)
+    desired, _, ready = out.partition(",")
+    return (int(desired) if desired.isdigit() else 0,
+            int(ready) if ready.isdigit() else 0)
+
+
 def _ready_replicas() -> int:
-    out = _kubectl("get", "deployment/provisioning-service", "-o", "jsonpath={.status.readyReplicas}", check=False)
-    return int(out) if out.isdigit() else 0
+    return _replica_counts()[1]
 
 
 class _PortForward:
@@ -155,9 +171,11 @@ def _watch_cluster(stop: threading.Event, samples: list[dict]) -> threading.Thre
 
     def watch() -> None:
         while not stop.is_set():
+            desired, ready = _replica_counts()
             samples.append({
                 "t": round(time.monotonic() - started, 1),
-                "replicas": _ready_replicas(),
+                "desired": desired,
+                "ready": ready,
                 "cpu_percent": _provisioning_cpu_percent(),
             })
             stop.wait(2.0)
@@ -167,7 +185,8 @@ def _watch_cluster(stop: threading.Event, samples: list[dict]) -> threading.Thre
     return thread
 
 
-def run_once(mode: str, replicas: int, n: int, rate: float, concurrency: int) -> dict:
+def run_once(mode: str, replicas: int, n: int, rate: float, concurrency: int,
+             settle_s: float = 0.0) -> dict:
     if mode == "fixed":
         _pin_replicas(replicas)
     else:
@@ -185,6 +204,12 @@ def run_once(mode: str, replicas: int, n: int, rate: float, concurrency: int) ->
         started = time.monotonic()
         results = driver.run(n=n, rate=rate, concurrency=concurrency)
         wall_s = time.monotonic() - started
+
+    # Keep sampling after the burst. The replicas the HPA asked for during the
+    # burst arrive after it, and when they arrive is the measurement that says
+    # whether horizontal scaling could ever have answered a burst this long.
+    if settle_s:
+        stop.wait(settle_s)
 
     stop.set()
     watcher.join(timeout=10)
@@ -217,7 +242,8 @@ def run_once(mode: str, replicas: int, n: int, rate: float, concurrency: int) ->
         "free_lines_before": free_before,
         "free_lines_after": _free_lines(),
         "cluster_samples": samples,
-        "max_ready_replicas": max((s["replicas"] for s in samples), default=0),
+        **scale_timeline(samples),
+        "settle_s": settle_s,
         "max_cpu_percent": max(cpu_seen, default=None),
         "mean_cpu_percent": round(statistics.mean(cpu_seen)) if cpu_seen else None,
     }
@@ -230,6 +256,9 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--n", type=int, default=300)
     parser.add_argument("--rate", type=float, default=100.0, help="burst rate, activations per second")
+    parser.add_argument("--settle", type=float, default=0.0,
+                        help="seconds to keep sampling after the burst, so replicas the "
+                             "HPA asked for during it are recorded when they arrive")
     parser.add_argument("--concurrency", type=int, default=40,
                         help="activations in flight at once; 1 makes the driver closed-loop and creates no burst")
     args = parser.parse_args()
@@ -241,13 +270,16 @@ def main() -> None:
     rows = []
     with output.open("w", encoding="utf-8") as handle:
         for run in range(1, args.runs + 1):
-            row = run_once(args.mode, args.replicas, args.n, args.rate, args.concurrency)
+            row = run_once(args.mode, args.replicas, args.n, args.rate, args.concurrency,
+                           settle_s=args.settle)
             row["run"] = run
             handle.write(json.dumps(row) + "\n")
             handle.flush()
             rows.append(row)
             print(f"run {run}/{args.runs}: p50={row['p50_ms']}ms p95={row['p95_ms']}ms "
-                  f"throughput={row['throughput_per_s']}/s max_replicas={row['max_ready_replicas']} "
+                  f"throughput={row['throughput_per_s']}/s "
+                  f"replicas={row['max_desired_replicas']}desired/{row['max_ready_replicas']}ready "
+                  f"lag={row['startup_lag_s']}s "
                   f"cpu_max={row['max_cpu_percent']}% pool={row['free_lines_before']}->{row['free_lines_after']}")
 
     def summarise(key: str) -> str:

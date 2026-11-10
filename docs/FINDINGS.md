@@ -158,14 +158,88 @@ Covered by `InventoryServiceIT.concurrentDuplicateActivationIdReservesExactlyOne
 
 ---
 
-## 6. Kubernetes and autoscaling
+## 6. Kubernetes autoscaling: the HPA reacted, and it did not matter
 
-Manifests are in `k8s/`, and the experiment is
-`bench/run_scaling_experiment.py`. **This experiment has not been run, so no
-number is published for it.** The manifests apply and the HPA is configured
-against CPU with requests and limits set, but the measurement comparing fixed
-replicas against an HPA under a 5x burst has not been executed on a cluster, and
-an unrun experiment gets no row in this document.
+```bash
+bash k8s/bootstrap.sh
+python -m bench.run_scaling_experiment --mode fixed --replicas 1 --runs 3 --n 1500 --rate 100 --concurrency 40 --settle 180
+python -m bench.run_scaling_experiment --mode hpa                --runs 3 --n 1500 --rate 100 --concurrency 40 --settle 180
+```
+
+Rows in `bench/results/scaling-fixed-1.jsonl` and
+`bench/results/scaling-hpa-auto.jsonl`. Three runs per arm, 1,500 activations
+per run, 40 in flight at once, on a one-node kind cluster. Both arms ran the
+same burst with the same instrumentation.
+
+| Arm | p50 | p95 | p99 | Throughput |
+|---|---|---|---|---|
+| Fixed, 1 replica | 536.9 (SE 81.8) ms | 933.1 (SE 70.7) ms | 1114.6 (SE 84.4) ms | 67.7 (SE 5.4) /s |
+| HPA, 1 to 5 replicas | 433.1 (SE 135.7) ms | **932.3** (SE 43.0) ms | 1104.2 (SE 49.8) ms | 69.5 (SE 4.4) /s |
+
+**The autoscaler made no difference this experiment can detect.** p95 differs by
+0.8 ms on a 933 ms figure. Throughput differs by 1.8 per second against standard
+errors of 5.4 and 4.4. p50 looks better under the HPA and the standard error on
+it is larger than the difference.
+
+The interesting part is why, and it is measured rather than assumed.
+
+### The autoscaler was not asleep
+
+| Run | Burst ended | HPA asked for a 2nd pod | 2nd pod ready | Peak CPU |
+|---|---|---|---|---|
+| 1 | 24.5 s | 43.6 s | 63.4 s | 250% |
+| 2 | 19.8 s | 32.2 s | 52.0 s | 260% |
+| 3 | 20.9 s | 41.2 s | 61.0 s | 250% |
+
+CPU peaked at two and a half to three times the 200m request, far above the 70
+percent target, and `kubectl describe hpa` records `SuccessfulRescale` in every
+run. The HPA did exactly what it was configured to do. **It asked for the second
+pod 12 to 23 seconds after the burst had already finished, and that pod started
+serving 30 to 40 seconds after that.**
+
+The reaction time decomposes into two independent costs:
+
+- **Roughly 30 to 40 seconds before the HPA asks.** The CPU samples show
+  utilisation reading 2 percent for the first 18 to 30 seconds of a burst that
+  had the service saturated from the first second. That is the kubelet's
+  scrape interval plus metrics-server's resolution plus the HPA's 15-second
+  sync, and none of it is tunable from a manifest.
+- **Roughly 20 seconds for the pod to serve.** JVM start plus Spring Boot
+  context initialisation, measured here as the gap between the replica count
+  rising and the ready count following it.
+
+**So the floor on this system's horizontal reaction is about 52 to 63 seconds,
+against a burst of about 20.** No HPA setting closes that gap, because most of
+it is the metrics pipeline rather than the scaling policy. A burst shorter than
+roughly a minute has to be absorbed by capacity that is already running —
+headroom, or a queue — and autoscaling answers a different question: sustained
+load that lasts longer than the loop takes to notice.
+
+### Two defects this measurement found in its own harness
+
+Both would have been published as facts about Kubernetes.
+
+**The first version sampled only `readyReplicas`,** and reported
+`max_ready_replicas = 1` for every run. Read literally that says the autoscaler
+never reacted, which is the opposite of what happened: it reacted in every run
+and the pods arrived after the burst. An HPA that cannot see and an HPA that
+cannot start pods in time are opposite findings with opposite fixes, and a
+single column cannot tell them apart. The experiment now samples the desired
+count and the ready count together and reports the lag between them.
+
+**The pool was never reset between runs.** A successful activation keeps its
+line permanently, so 2,000 seeded lines cover about 2,000 activations for the
+entire life of a cluster, not per run. Eight runs of 300 had drained it: 2,000
+of 2,000 lines held, 2,400 orders, and the last few hundred activations failing
+fast against an empty pool while the run reported their latency as though they
+had been served. Fast failures lower p50 and raise throughput, so the drift
+flattered the results. Every run now resets the pool, refuses to start if the
+pool cannot cover it with 20 percent headroom, and records `free_lines_before`
+and `free_lines_after` in its own row as evidence.
+
+The second one is the more uncomfortable finding, because the harness had been
+reporting numbers for several runs before anything noticed, and nothing in the
+output said the system under test had changed.
 
 ---
 
@@ -175,7 +249,7 @@ an unrun experiment gets no row in this document.
 ./mvnw -DskipTests package
 docker compose up -d --build
 ./mvnw test                      # 47 Java tests
-python -m pytest bench/tests -q  # 17 Python tests
+python -m pytest bench/tests -q  # 41 Python tests (needs the Compose stack up)
 for arm in naive saga outbox; do
   for profile in clean fail5 fail10 fail25; do
     python -m bench.run_experiment --arm "$arm" --profile "$profile" --runs 3 --n 100 --rate 20

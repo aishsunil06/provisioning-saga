@@ -40,7 +40,7 @@ same seeds so every arm meets the same injected failures.
 Defects per 1,000 activations. Every one was an orphaned reservation: a line
 held for an order that will never activate.
 
-Three things worth reading the findings for:
+Four things worth reading the findings for:
 
 1. **The naive leak rate is the failure rate.** 4.3, 11.3 and 28.7 percent
    against 5, 10 and 25 injected. Not correlated with it, equal to it, because
@@ -54,6 +54,11 @@ Three things worth reading the findings for:
    orchestration mostly refuses work when the orchestrator dies rather than
    abandoning it halfway. Its mechanism is proven by unit test; its benefit is
    not proven by this experiment. Both facts are in the findings.
+4. **The autoscaler reacted and it did not matter.** Under a 20-second burst the
+   HPA asked for a second pod at 32 to 44 seconds and that pod served at 52 to
+   63 seconds — after the burst was over. p95 was 932 ms with autoscaling and
+   933 ms without. About 30 to 40 seconds of that is the metrics pipeline, not
+   the scaling policy, so no HPA setting closes it.
 
 ## What is in here
 
@@ -102,7 +107,7 @@ Tests:
 
 ```bash
 ./mvnw test                      # 47 Java tests, Testcontainers-backed, needs Docker
-python -m pytest bench/tests -q  # 17 Python tests, needs the system up
+python -m pytest bench/tests -q  # 41 Python tests, needs the system up
 ```
 
 One cell of the experiment:
@@ -116,10 +121,23 @@ the wrong directory on `sys.path`.
 
 ## Honest limits
 
-- **The Kubernetes autoscaling experiment has not been run.** The manifests in
-  `k8s/` apply and the HPA is configured against CPU with requests and limits
-  set, but no number is published for it, because an unrun experiment does not
-  get a row in the findings.
+- **The autoscaling result is about one burst length on one node.** It says a
+  20-second burst finishes before an HPA can answer it, on a single-node kind
+  cluster with metrics-server at its default resolution. It does not say
+  autoscaling is useless: sustained load lasting longer than the roughly
+  60-second reaction floor is exactly what an HPA is for, and that case was not
+  measured.
+- **The scaling harness measured the wrong thing twice before it measured this.**
+  It sampled only the ready replica count, which reported "the HPA never
+  scaled" when the HPA had scaled in every run; and it never reset the finite
+  line pool between runs, so several runs were quietly measuring an exhausted
+  pool. Both are described in the findings rather than quietly fixed, because
+  the second one produced numbers that looked reasonable for some time.
+- **The CPU figures are coarse.** They come from metrics-server, sampled every
+  two seconds from a pipeline whose own resolution is slower than that, which
+  is why a burst can read 2 percent while it is saturating the service. They
+  are good enough to show the HPA's input crossed its target several times over
+  and not good enough to be a profile.
 - **Orchestration is synchronous.** That is why the kill profile mostly refuses
   work instead of abandoning it, and it is the main reason arm C's advantage did
   not show. An asynchronous orchestrator would be a different experiment and
