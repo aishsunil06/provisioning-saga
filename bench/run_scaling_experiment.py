@@ -114,7 +114,7 @@ def _watch_replicas(stop: threading.Event, samples: list[tuple[float, int]]) -> 
     return thread
 
 
-def run_once(mode: str, replicas: int, n: int, rate: float) -> dict:
+def run_once(mode: str, replicas: int, n: int, rate: float, concurrency: int) -> dict:
     if mode == "fixed":
         _pin_replicas(replicas)
     else:
@@ -127,7 +127,7 @@ def run_once(mode: str, replicas: int, n: int, rate: float) -> dict:
     with _PortForward():
         driver = http_driver(GATEWAY, terminal_timeout_s=180.0)
         started = time.monotonic()
-        results = driver.run(n=n, rate=rate)
+        results = driver.run(n=n, rate=rate, concurrency=concurrency)
         wall_s = time.monotonic() - started
 
     stop.set()
@@ -147,6 +147,7 @@ def run_once(mode: str, replicas: int, n: int, rate: float) -> dict:
         "replicas_requested": replicas if mode == "fixed" else None,
         "n": n,
         "rate": rate,
+        "concurrency": concurrency,
         "wall_s": round(wall_s, 1),
         "throughput_per_s": round(len(settled) / wall_s, 2) if wall_s else 0.0,
         "p50_ms": percentile(50),
@@ -165,6 +166,8 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--n", type=int, default=300)
     parser.add_argument("--rate", type=float, default=100.0, help="burst rate, activations per second")
+    parser.add_argument("--concurrency", type=int, default=40,
+                        help="activations in flight at once; 1 makes the driver closed-loop and creates no burst")
     args = parser.parse_args()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -174,7 +177,7 @@ def main() -> None:
     rows = []
     with output.open("w", encoding="utf-8") as handle:
         for run in range(1, args.runs + 1):
-            row = run_once(args.mode, args.replicas, args.n, args.rate)
+            row = run_once(args.mode, args.replicas, args.n, args.rate, args.concurrency)
             row["run"] = run
             handle.write(json.dumps(row) + "\n")
             handle.flush()

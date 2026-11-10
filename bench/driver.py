@@ -7,6 +7,7 @@ test against the real clock would be a test of the machine's scheduler.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import time
 import urllib.error
@@ -53,25 +54,46 @@ class Driver:
         self._terminal_timeout_s = terminal_timeout_s
         self._poll_interval_s = poll_interval_s
 
-    def run(self, n: int, rate: float) -> list[ActivationResult]:
+    def run(self, n: int, rate: float, concurrency: int = 1) -> list[ActivationResult]:
+        """Submits n activations at a target rate and waits for each to settle.
+
+        With concurrency 1 this is closed-loop: each activation settles before
+        the next is submitted, so the achieved rate is capped at one over the
+        latency regardless of what `rate` asks for. That is the right shape for
+        measuring defects, where offered load is irrelevant, and the wrong shape
+        for measuring a burst: a service that is never asked to do two things at
+        once is never under load, and an autoscaler watching it has nothing to
+        react to. Concurrency above 1 paces submissions open-loop instead,
+        handing each to a worker and moving on.
+        """
         gap = 1.0 / rate if rate > 0 else 0.0
-        results: list[ActivationResult] = []
 
-        for index in range(n):
-            if index > 0 and gap > 0:
-                self._sleep(gap)
-            started = self._clock()
-            try:
-                activation_id = self._submit()
-            except Exception:
-                # A refusal is data, not a reason to stop. A run that aborts on
-                # the first rejection measures nothing at all.
-                results.append(ActivationResult("", SUBMIT_FAILED, (self._clock() - started) * 1000.0))
-                continue
-            state = self._await_terminal(activation_id, started)
-            results.append(ActivationResult(activation_id, state, (self._clock() - started) * 1000.0))
+        if concurrency <= 1:
+            results: list[ActivationResult] = []
+            for index in range(n):
+                if index > 0 and gap > 0:
+                    self._sleep(gap)
+                results.append(self._one())
+            return results
 
-        return results
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = []
+            for index in range(n):
+                if index > 0 and gap > 0:
+                    self._sleep(gap)
+                futures.append(pool.submit(self._one))
+            return [future.result() for future in futures]
+
+    def _one(self) -> ActivationResult:
+        started = self._clock()
+        try:
+            activation_id = self._submit()
+        except Exception:
+            # A refusal is data, not a reason to stop. A run that aborts on the
+            # first rejection measures nothing at all.
+            return ActivationResult("", SUBMIT_FAILED, (self._clock() - started) * 1000.0)
+        state = self._await_terminal(activation_id, started)
+        return ActivationResult(activation_id, state, (self._clock() - started) * 1000.0)
 
     def _await_terminal(self, activation_id: str, started: float) -> str:
         while True:
